@@ -1,0 +1,191 @@
+buildscript {
+    repositories {
+        maven { url = 'https://repo.spongepowered.org/repository/maven-public/' }
+        mavenCentral()
+    }
+    dependencies {
+        classpath 'org.spongepowered:mixingradle:0.7-SNAPSHOT'
+    }
+}
+
+plugins {
+    id 'eclipse'
+    id 'idea'
+    id 'net.minecraftforge.gradle' version '[6.0.16,6.2)'
+    id 'com.github.johnrengelman.shadow' version '8.1.1'
+}
+
+apply plugin: 'org.spongepowered.mixin'
+
+group = mod_group_id
+version = mod_version
+
+base {
+    archivesName = mod_id
+}
+
+java {
+    toolchain.languageVersion = JavaLanguageVersion.of(17)
+}
+
+minecraft {
+    mappings channel: mapping_channel, version: mapping_version
+    copyIdeResources = true
+
+    runs {
+        client {
+            workingDirectory project.file('run')
+            property 'forge.enabledGameTestNamespaces', mod_id
+            property 'forge.logging.markers', 'REGISTRIES'
+            property 'forge.logging.console.level', 'debug'
+
+            mods {
+                "${mod_id}" {
+                    source sourceSets.main
+                }
+            }
+        }
+        server {
+            workingDirectory project.file('run')
+            property 'forge.enabledGameTestNamespaces', mod_id
+            args '--nogui'
+
+            mods {
+                "${mod_id}" {
+                    source sourceSets.main
+                }
+            }
+        }
+        gameTestServer {
+            workingDirectory project.file('run')
+            property 'forge.enabledGameTestNamespaces', mod_id
+
+            mods {
+                "${mod_id}" {
+                    source sourceSets.main
+                }
+            }
+        }
+        data {
+            workingDirectory project.file('run-data')
+            args '--mod', mod_id, '--all',
+                    '--output', file('src/generated/resources/'),
+                    '--existing', file('src/main/resources/')
+        }
+    }
+}
+
+mixin {
+    config "${mod_id}.mixins.json"
+}
+
+sourceSets.main.resources {
+    srcDir 'src/generated/resources'
+    srcDir 'src/main/resources'
+}
+
+repositories {
+    mavenCentral()
+    maven { url 'https://repo1.maven.org/maven2/' }
+    maven { url 'https://jitpack.io' }
+}
+
+dependencies {
+    minecraft "net.minecraftforge:forge:${minecraft_version}-${forge_version}"
+
+    // Lombok
+    compileOnly 'org.projectlombok:lombok:1.18.26'
+    annotationProcessor 'org.projectlombok:lombok:1.18.26'
+    testImplementation 'org.projectlombok:lombok:1.18.26'
+    testAnnotationProcessor 'org.projectlombok:lombok:1.18.26'
+
+    // Mixin annotation processor
+    annotationProcessor 'org.spongepowered:mixin:0.8.5:processor'
+
+    // OkHttp
+    implementation 'com.squareup.okhttp3:okhttp:4.12.0'
+}
+
+tasks.withType(JavaCompile).configureEach {
+    options.encoding = 'UTF-8'
+}
+
+// ShadowJar 打包并 relocate okhttp/okio 避免冲突
+tasks.shadowJar {
+    archiveClassifier.set('')
+    from sourceSets.main.output
+    configurations = [project.configurations.runtimeClasspath]
+    exclude 'META-INF/*.SF', 'META-INF/*.DSA', 'META-INF/*.RSA'
+    relocate 'okhttp3', "com.${mod_id}.shaded.okhttp3"
+    relocate 'okio', "com.${mod_id}.shaded.okio"
+    mergeServiceFiles()
+    minimize()
+}
+
+// Reobf ShadowJar
+reobf {
+    shadowJar {}
+}
+
+tasks.build.dependsOn tasks.shadowJar
+
+tasks.named('jar').configure {
+    dependsOn 'shadowJar'
+    archiveFile.set(tasks.shadowJar.archiveFile)
+    finalizedBy 'reobfShadowJar'
+    duplicatesStrategy = DuplicatesStrategy.EXCLUDE
+}
+
+tasks.named('processResources', ProcessResources).configure {
+    duplicatesStrategy = DuplicatesStrategy.EXCLUDE
+
+    var replaceProperties = [
+            minecraft_version      : minecraft_version,
+            minecraft_version_range: minecraft_version_range,
+            forge_version          : forge_version,
+            forge_version_range    : forge_version_range,
+            loader_version_range   : loader_version_range,
+            mod_id                 : mod_id,
+            mod_name               : mod_name,
+            mod_license            : mod_license,
+            mod_version            : mod_version,
+            mod_authors            : mod_authors,
+            mod_description        : mod_description
+    ]
+
+    inputs.properties replaceProperties
+
+    filesMatching(['META-INF/mods.toml', 'pack.mcmeta']) {
+        expand replaceProperties + [project: project]
+    }
+}
+
+tasks.register('extractRuntimeClasspath', Copy) {
+    from configurations.runtimeClasspath
+    into "$buildDir/runtimeClasspath"
+}
+
+// 检查 OkHttp 是否在运行时 classpath
+tasks.register('checkOkHttp') {
+    doLast {
+        println "=== RuntimeClasspath JARs ==="
+        configurations.runtimeClasspath.each { File f ->
+            println " -> ${f.name}"
+        }
+
+        def hasClass = configurations.runtimeClasspath.find { f ->
+            f.name.contains("okhttp")
+        }?.with { f ->
+            def zip = new java.util.zip.ZipFile(f)
+            def entry = zip.getEntry("okhttp3/WebSocketListener.class")
+            zip.close()
+            return entry != null
+        }
+
+        if (hasClass) {
+            println "✅ Found okhttp3.WebSocketListener in runtimeClasspath"
+        } else {
+            println "❌ Did NOT find okhttp3.WebSocketListener in runtimeClasspath"
+        }
+    }
+}
